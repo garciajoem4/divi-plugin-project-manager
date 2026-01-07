@@ -336,3 +336,869 @@ function dicm_track_user_login( $user_login, $user ) {
 add_action( 'wp_login', 'dicm_track_user_login', 10, 2 );
 
 error_log('TimesheetTracker: Procedural AJAX handlers registered');
+
+// ==================== PROJECT MANAGER AJAX HANDLERS ====================
+
+/**
+ * Verify user access and nonce for Project Manager AJAX requests
+ */
+function dicm_pm_verify_request() {
+	if ( ! is_user_logged_in() ) {
+		wp_send_json_error( array( 'message' => 'Authentication required' ), 401 );
+		exit;
+	}
+	
+	$nonce = isset( $_POST['nonce'] ) ? $_POST['nonce'] : ( isset( $_REQUEST['nonce'] ) ? $_REQUEST['nonce'] : '' );
+	
+	if ( empty( $nonce ) || ! wp_verify_nonce( $nonce, 'project_manager_nonce' ) ) {
+		wp_send_json_error( array( 'message' => 'Security check failed' ), 403 );
+		exit;
+	}
+	
+	return get_current_user_id();
+}
+
+/**
+ * Check if user has access to view a project
+ * All logged-in users can view projects and tasks
+ */
+function dicm_pm_user_has_project_access( $project_id, $user_id ) {
+	// All logged-in users can view any project and its tasks
+	return is_user_logged_in();
+}
+
+/**
+ * Check if user can manage project settings (edit/delete project, manage columns)
+ * Only project owners and admins can manage projects
+ */
+function dicm_pm_user_can_manage_project( $project_id, $user_id ) {
+	global $wpdb;
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	
+	// Admins can manage any project
+	if ( current_user_can( 'manage_options' ) ) {
+		return true;
+	}
+	
+	// Check if user is the owner
+	$is_owner = $wpdb->get_var( $wpdb->prepare(
+		"SELECT COUNT(*) FROM $projects_table WHERE id = %d AND owner_id = %d",
+		$project_id, $user_id
+	) );
+	
+	return $is_owner > 0;
+}
+
+/**
+ * Create Project Manager database tables if they don't exist
+ */
+function dicm_pm_ensure_tables() {
+	global $wpdb;
+	
+	$charset_collate = $wpdb->get_charset_collate();
+	
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	if ( $wpdb->get_var( "SHOW TABLES LIKE '$projects_table'" ) != $projects_table ) {
+		$sql = "CREATE TABLE $projects_table (
+			id bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+			name varchar(255) NOT NULL,
+			description text,
+			color varchar(20) DEFAULT '#3b82f6',
+			owner_id bigint(20) UNSIGNED NOT NULL,
+			created_at datetime DEFAULT CURRENT_TIMESTAMP,
+			updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			archived tinyint(1) DEFAULT 0,
+			PRIMARY KEY (id),
+			KEY owner_id (owner_id)
+		) $charset_collate;";
+		
+		require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
+		dbDelta( $sql );
+	}
+	
+	$statuses_table = $wpdb->prefix . 'pm_statuses';
+	if ( $wpdb->get_var( "SHOW TABLES LIKE '$statuses_table'" ) != $statuses_table ) {
+		$sql = "CREATE TABLE $statuses_table (
+			id bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+			project_id bigint(20) UNSIGNED NOT NULL,
+			name varchar(100) NOT NULL,
+			color varchar(20) DEFAULT '#6b7280',
+			order_index int DEFAULT 0,
+			is_default tinyint(1) DEFAULT 0,
+			is_done tinyint(1) DEFAULT 0,
+			created_at datetime DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			KEY project_id (project_id),
+			KEY order_index (order_index)
+		) $charset_collate;";
+		
+		require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
+		dbDelta( $sql );
+	}
+	
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	if ( $wpdb->get_var( "SHOW TABLES LIKE '$tasks_table'" ) != $tasks_table ) {
+		$sql = "CREATE TABLE $tasks_table (
+			id bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+			project_id bigint(20) UNSIGNED NOT NULL,
+			status_id bigint(20) UNSIGNED NOT NULL,
+			title varchar(500) NOT NULL,
+			description text,
+			priority varchar(20) DEFAULT 'Medium',
+			due_date date DEFAULT NULL,
+			assignee_id bigint(20) UNSIGNED DEFAULT NULL,
+			creator_id bigint(20) UNSIGNED NOT NULL,
+			order_index int DEFAULT 0,
+			created_at datetime DEFAULT CURRENT_TIMESTAMP,
+			updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			completed_at datetime DEFAULT NULL,
+			PRIMARY KEY (id),
+			KEY project_id (project_id),
+			KEY status_id (status_id),
+			KEY assignee_id (assignee_id),
+			KEY order_index (order_index),
+			KEY due_date (due_date)
+		) $charset_collate;";
+		
+		require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
+		dbDelta( $sql );
+	}
+	
+	$members_table = $wpdb->prefix . 'pm_project_members';
+	if ( $wpdb->get_var( "SHOW TABLES LIKE '$members_table'" ) != $members_table ) {
+		$sql = "CREATE TABLE $members_table (
+			id bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+			project_id bigint(20) UNSIGNED NOT NULL,
+			user_id bigint(20) UNSIGNED NOT NULL,
+			role varchar(50) DEFAULT 'member',
+			added_at datetime DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			UNIQUE KEY project_user (project_id, user_id),
+			KEY project_id (project_id),
+			KEY user_id (user_id)
+		) $charset_collate;";
+		
+		require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
+		dbDelta( $sql );
+	}
+}
+
+// ==================== PROJECT HANDLERS ====================
+
+function dicm_pm_ajax_get_projects() {
+	$user_id = dicm_pm_verify_request();
+	dicm_pm_ensure_tables();
+	
+	global $wpdb;
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	
+	// Get ALL non-archived projects - visible to all logged-in users
+	$projects = $wpdb->get_results(
+		"SELECT * FROM $projects_table WHERE archived = 0 ORDER BY created_at DESC"
+	);
+	
+	foreach ( $projects as &$project ) {
+		$owner = get_userdata( $project->owner_id );
+		$project->owner_name = $owner ? $owner->display_name : 'Unknown';
+		// Mark if current user is owner (for edit/delete permissions in UI)
+		$project->is_owner = ( $project->owner_id == $user_id );
+		// Also mark if user can manage (owner or admin)
+		$project->can_manage = ( $project->owner_id == $user_id || current_user_can( 'manage_options' ) );
+	}
+	
+	wp_send_json_success( array( 'projects' => $projects ) );
+}
+add_action( 'wp_ajax_pm_get_projects', 'dicm_pm_ajax_get_projects' );
+
+function dicm_pm_ajax_create_project() {
+	$user_id = dicm_pm_verify_request();
+	dicm_pm_ensure_tables();
+	
+	// Only admins can create projects
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_send_json_error( array( 'message' => 'Only administrators can create projects' ) );
+	}
+	
+	global $wpdb;
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	$statuses_table = $wpdb->prefix . 'pm_statuses';
+	
+	$name = sanitize_text_field( $_POST['name'] );
+	$description = sanitize_textarea_field( isset( $_POST['description'] ) ? $_POST['description'] : '' );
+	$color = sanitize_hex_color( isset( $_POST['color'] ) ? $_POST['color'] : '#3b82f6' );
+	$default_statuses = isset( $_POST['default_statuses'] ) ? $_POST['default_statuses'] : array();
+	
+	if ( empty( $name ) ) {
+		wp_send_json_error( array( 'message' => 'Project name is required' ) );
+	}
+	
+	$result = $wpdb->insert( $projects_table, array(
+		'name' => $name,
+		'description' => $description,
+		'color' => $color,
+		'owner_id' => $user_id
+	) );
+	
+	if ( $result === false ) {
+		wp_send_json_error( array( 'message' => 'Failed to create project' ) );
+	}
+	
+	$project_id = $wpdb->insert_id;
+	
+	if ( ! empty( $default_statuses ) ) {
+		foreach ( $default_statuses as $index => $status ) {
+			$wpdb->insert( $statuses_table, array(
+				'project_id' => $project_id,
+				'name' => sanitize_text_field( $status['name'] ),
+				'color' => sanitize_hex_color( isset( $status['color'] ) ? $status['color'] : '#6b7280' ),
+				'order_index' => $index,
+				'is_default' => $index === 0 ? 1 : 0,
+				'is_done' => $index === count( $default_statuses ) - 1 ? 1 : 0
+			) );
+		}
+	}
+	
+	wp_send_json_success( array(
+		'message' => 'Project created successfully',
+		'project_id' => $project_id
+	) );
+}
+add_action( 'wp_ajax_pm_create_project', 'dicm_pm_ajax_create_project' );
+
+function dicm_pm_ajax_update_project() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	
+	$project_id = intval( $_POST['project_id'] );
+	
+	// Only owners and admins can update project settings
+	if ( ! dicm_pm_user_can_manage_project( $project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Only project owners can edit project settings' ) );
+	}
+	
+	$data = array();
+	if ( isset( $_POST['name'] ) ) $data['name'] = sanitize_text_field( $_POST['name'] );
+	if ( isset( $_POST['description'] ) ) $data['description'] = sanitize_textarea_field( $_POST['description'] );
+	if ( isset( $_POST['color'] ) ) $data['color'] = sanitize_hex_color( $_POST['color'] );
+	if ( isset( $_POST['archived'] ) ) $data['archived'] = intval( $_POST['archived'] );
+	
+	if ( empty( $data ) ) {
+		wp_send_json_error( array( 'message' => 'No data to update' ) );
+	}
+	
+	$wpdb->update( $projects_table, $data, array( 'id' => $project_id ) );
+	
+	wp_send_json_success( array( 'message' => 'Project updated successfully' ) );
+}
+add_action( 'wp_ajax_pm_update_project', 'dicm_pm_ajax_update_project' );
+
+function dicm_pm_ajax_delete_project() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	
+	$project_id = intval( $_POST['project_id'] );
+	
+	$project = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $projects_table WHERE id = %d",
+		$project_id
+	) );
+	
+	if ( ! $project || ! dicm_pm_user_can_manage_project( $project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Only the project owner or admin can delete this project' ) );
+	}
+	
+	$wpdb->delete( $wpdb->prefix . 'pm_tasks', array( 'project_id' => $project_id ) );
+	$wpdb->delete( $wpdb->prefix . 'pm_statuses', array( 'project_id' => $project_id ) );
+	$wpdb->delete( $wpdb->prefix . 'pm_project_members', array( 'project_id' => $project_id ) );
+	$wpdb->delete( $projects_table, array( 'id' => $project_id ) );
+	
+	wp_send_json_success( array( 'message' => 'Project deleted successfully' ) );
+}
+add_action( 'wp_ajax_pm_delete_project', 'dicm_pm_ajax_delete_project' );
+
+// ==================== STATUS HANDLERS ====================
+
+function dicm_pm_ajax_get_statuses() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$statuses_table = $wpdb->prefix . 'pm_statuses';
+	
+	$project_id = intval( $_POST['project_id'] );
+	
+	if ( ! dicm_pm_user_has_project_access( $project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$statuses = $wpdb->get_results( $wpdb->prepare(
+		"SELECT * FROM $statuses_table WHERE project_id = %d ORDER BY order_index ASC",
+		$project_id
+	) );
+	
+	wp_send_json_success( array( 'statuses' => $statuses ) );
+}
+add_action( 'wp_ajax_pm_get_statuses', 'dicm_pm_ajax_get_statuses' );
+
+function dicm_pm_ajax_create_status() {
+	$user_id = dicm_pm_verify_request();
+	
+	// Only admins can create columns/statuses
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_send_json_error( array( 'message' => 'Only administrators can create columns' ) );
+	}
+	
+	global $wpdb;
+	$statuses_table = $wpdb->prefix . 'pm_statuses';
+	
+	$project_id = intval( $_POST['project_id'] );
+	$name = sanitize_text_field( $_POST['name'] );
+	$color = sanitize_hex_color( isset( $_POST['color'] ) ? $_POST['color'] : '#6b7280' );
+	
+	// Check if user has access to the project
+	if ( ! dicm_pm_user_has_project_access( $project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$max_order = $wpdb->get_var( $wpdb->prepare(
+		"SELECT MAX(order_index) FROM $statuses_table WHERE project_id = %d",
+		$project_id
+	) );
+	
+	$result = $wpdb->insert( $statuses_table, array(
+		'project_id' => $project_id,
+		'name' => $name,
+		'color' => $color,
+		'order_index' => ( $max_order ?? -1 ) + 1
+	) );
+	
+	if ( $result === false ) {
+		wp_send_json_error( array( 'message' => 'Failed to create status' ) );
+	}
+	
+	wp_send_json_success( array(
+		'message' => 'Status created successfully',
+		'status_id' => $wpdb->insert_id
+	) );
+}
+add_action( 'wp_ajax_pm_create_status', 'dicm_pm_ajax_create_status' );
+
+function dicm_pm_ajax_update_status() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$statuses_table = $wpdb->prefix . 'pm_statuses';
+	
+	$status_id = intval( $_POST['status_id'] );
+	
+	$status = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $statuses_table WHERE id = %d",
+		$status_id
+	) );
+	
+	if ( ! $status ) {
+		wp_send_json_error( array( 'message' => 'Status not found' ) );
+	}
+	
+	// Only admins and project owners can edit columns
+	if ( ! dicm_pm_user_can_manage_project( $status->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Only project owners and admins can edit columns' ) );
+	}
+	
+	$data = array();
+	if ( isset( $_POST['name'] ) ) $data['name'] = sanitize_text_field( $_POST['name'] );
+	if ( isset( $_POST['color'] ) ) $data['color'] = sanitize_hex_color( $_POST['color'] );
+	if ( isset( $_POST['is_done'] ) ) $data['is_done'] = intval( $_POST['is_done'] );
+	
+	$wpdb->update( $statuses_table, $data, array( 'id' => $status_id ) );
+	
+	wp_send_json_success( array( 'message' => 'Status updated successfully' ) );
+}
+add_action( 'wp_ajax_pm_update_status', 'dicm_pm_ajax_update_status' );
+
+function dicm_pm_ajax_delete_status() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$statuses_table = $wpdb->prefix . 'pm_statuses';
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$status_id = intval( $_POST['status_id'] );
+	$move_tasks_to = isset( $_POST['move_tasks_to'] ) ? intval( $_POST['move_tasks_to'] ) : null;
+	
+	$status = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $statuses_table WHERE id = %d",
+		$status_id
+	) );
+	
+	if ( ! $status ) {
+		wp_send_json_error( array( 'message' => 'Status not found' ) );
+	}
+	
+	// Only admins and project owners can delete columns
+	if ( ! dicm_pm_user_can_manage_project( $status->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Only project owners and admins can delete columns' ) );
+	}
+	
+	if ( $move_tasks_to ) {
+		$wpdb->update( $tasks_table,
+			array( 'status_id' => $move_tasks_to ),
+			array( 'status_id' => $status_id )
+		);
+	} else {
+		$wpdb->delete( $tasks_table, array( 'status_id' => $status_id ) );
+	}
+	
+	$wpdb->delete( $statuses_table, array( 'id' => $status_id ) );
+	
+	wp_send_json_success( array( 'message' => 'Status deleted successfully' ) );
+}
+add_action( 'wp_ajax_pm_delete_status', 'dicm_pm_ajax_delete_status' );
+
+function dicm_pm_ajax_reorder_statuses() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$statuses_table = $wpdb->prefix . 'pm_statuses';
+	
+	$status_order = isset( $_POST['status_order'] ) ? $_POST['status_order'] : array();
+	$project_id = intval( $_POST['project_id'] );
+	
+	// Only admins and project owners can reorder columns
+	if ( ! dicm_pm_user_can_manage_project( $project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Only project owners and admins can reorder columns' ) );
+	}
+	
+	foreach ( $status_order as $index => $status_id ) {
+		$wpdb->update( $statuses_table,
+			array( 'order_index' => $index ),
+			array( 'id' => intval( $status_id ), 'project_id' => $project_id )
+		);
+	}
+	
+	wp_send_json_success( array( 'message' => 'Statuses reordered successfully' ) );
+}
+add_action( 'wp_ajax_pm_reorder_statuses', 'dicm_pm_ajax_reorder_statuses' );
+
+// ==================== TASK HANDLERS ====================
+
+function dicm_pm_ajax_get_tasks() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$project_id = intval( $_POST['project_id'] );
+	
+	if ( ! dicm_pm_user_has_project_access( $project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$tasks = $wpdb->get_results( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE project_id = %d ORDER BY status_id, order_index ASC",
+		$project_id
+	) );
+	
+	foreach ( $tasks as &$task ) {
+		if ( $task->assignee_id ) {
+			$assignee = get_userdata( $task->assignee_id );
+			$task->assignee_name = $assignee ? $assignee->display_name : 'Unknown';
+			$task->assignee_avatar = get_avatar_url( $task->assignee_id, array( 'size' => 32 ) );
+		}
+		$creator = get_userdata( $task->creator_id );
+		$task->creator_name = $creator ? $creator->display_name : 'Unknown';
+	}
+	
+	wp_send_json_success( array( 'tasks' => $tasks ) );
+}
+add_action( 'wp_ajax_pm_get_tasks', 'dicm_pm_ajax_get_tasks' );
+
+function dicm_pm_ajax_create_task() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$project_id = intval( $_POST['project_id'] );
+	$status_id = intval( $_POST['status_id'] );
+	$title = sanitize_text_field( $_POST['title'] );
+	$description = sanitize_textarea_field( isset( $_POST['description'] ) ? $_POST['description'] : '' );
+	$priority = sanitize_text_field( isset( $_POST['priority'] ) ? $_POST['priority'] : 'Medium' );
+	$due_date = isset( $_POST['due_date'] ) && ! empty( $_POST['due_date'] ) ? sanitize_text_field( $_POST['due_date'] ) : null;
+	$assignee_id = isset( $_POST['assignee_id'] ) && ! empty( $_POST['assignee_id'] ) ? intval( $_POST['assignee_id'] ) : null;
+	
+	if ( ! dicm_pm_user_has_project_access( $project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	if ( empty( $title ) ) {
+		wp_send_json_error( array( 'message' => 'Task title is required' ) );
+	}
+	
+	$max_order = $wpdb->get_var( $wpdb->prepare(
+		"SELECT MAX(order_index) FROM $tasks_table WHERE status_id = %d",
+		$status_id
+	) );
+	
+	$result = $wpdb->insert( $tasks_table, array(
+		'project_id' => $project_id,
+		'status_id' => $status_id,
+		'title' => $title,
+		'description' => $description,
+		'priority' => $priority,
+		'due_date' => $due_date,
+		'assignee_id' => $assignee_id,
+		'creator_id' => $user_id,
+		'order_index' => ( $max_order ?? -1 ) + 1
+	) );
+	
+	if ( $result === false ) {
+		wp_send_json_error( array( 'message' => 'Failed to create task' ) );
+	}
+	
+	$task_id = $wpdb->insert_id;
+	$task = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $tasks_table WHERE id = %d", $task_id ) );
+	
+	if ( $task->assignee_id ) {
+		$assignee = get_userdata( $task->assignee_id );
+		$task->assignee_name = $assignee ? $assignee->display_name : 'Unknown';
+		$task->assignee_avatar = get_avatar_url( $task->assignee_id, array( 'size' => 32 ) );
+	}
+	
+	wp_send_json_success( array(
+		'message' => 'Task created successfully',
+		'task' => $task
+	) );
+}
+add_action( 'wp_ajax_pm_create_task', 'dicm_pm_ajax_create_task' );
+
+function dicm_pm_ajax_update_task() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$task_id = intval( $_POST['task_id'] );
+	
+	$task = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE id = %d",
+		$task_id
+	) );
+	
+	if ( ! $task || ! dicm_pm_user_has_project_access( $task->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$data = array();
+	if ( isset( $_POST['title'] ) ) $data['title'] = sanitize_text_field( $_POST['title'] );
+	if ( isset( $_POST['description'] ) ) $data['description'] = sanitize_textarea_field( $_POST['description'] );
+	if ( isset( $_POST['priority'] ) ) $data['priority'] = sanitize_text_field( $_POST['priority'] );
+	if ( isset( $_POST['due_date'] ) ) $data['due_date'] = ! empty( $_POST['due_date'] ) ? sanitize_text_field( $_POST['due_date'] ) : null;
+	if ( isset( $_POST['assignee_id'] ) ) $data['assignee_id'] = ! empty( $_POST['assignee_id'] ) ? intval( $_POST['assignee_id'] ) : null;
+	
+	if ( empty( $data ) ) {
+		wp_send_json_error( array( 'message' => 'No data to update' ) );
+	}
+	
+	$wpdb->update( $tasks_table, $data, array( 'id' => $task_id ) );
+	
+	$updated_task = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $tasks_table WHERE id = %d", $task_id ) );
+	
+	if ( $updated_task->assignee_id ) {
+		$assignee = get_userdata( $updated_task->assignee_id );
+		$updated_task->assignee_name = $assignee ? $assignee->display_name : 'Unknown';
+		$updated_task->assignee_avatar = get_avatar_url( $updated_task->assignee_id, array( 'size' => 32 ) );
+	}
+	
+	wp_send_json_success( array(
+		'message' => 'Task updated successfully',
+		'task' => $updated_task
+	) );
+}
+add_action( 'wp_ajax_pm_update_task', 'dicm_pm_ajax_update_task' );
+
+function dicm_pm_ajax_delete_task() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$task_id = intval( $_POST['task_id'] );
+	
+	$task = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE id = %d",
+		$task_id
+	) );
+	
+	if ( ! $task || ! dicm_pm_user_has_project_access( $task->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$wpdb->delete( $tasks_table, array( 'id' => $task_id ) );
+	
+	wp_send_json_success( array( 'message' => 'Task deleted successfully' ) );
+}
+add_action( 'wp_ajax_pm_delete_task', 'dicm_pm_ajax_delete_task' );
+
+function dicm_pm_ajax_move_task() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	$statuses_table = $wpdb->prefix . 'pm_statuses';
+	
+	$task_id = intval( $_POST['task_id'] );
+	$new_status_id = intval( $_POST['new_status_id'] );
+	$new_order = intval( isset( $_POST['new_order'] ) ? $_POST['new_order'] : 0 );
+	
+	$task = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE id = %d",
+		$task_id
+	) );
+	
+	if ( ! $task || ! dicm_pm_user_has_project_access( $task->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$status = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $statuses_table WHERE id = %d AND project_id = %d",
+		$new_status_id, $task->project_id
+	) );
+	
+	if ( ! $status ) {
+		wp_send_json_error( array( 'message' => 'Invalid status' ) );
+	}
+	
+	$update_data = array(
+		'status_id' => $new_status_id,
+		'order_index' => $new_order
+	);
+	
+	if ( $status->is_done ) {
+		$update_data['completed_at'] = current_time( 'mysql' );
+	} else {
+		$update_data['completed_at'] = null;
+	}
+	
+	$wpdb->update( $tasks_table, $update_data, array( 'id' => $task_id ) );
+	
+	wp_send_json_success( array( 'message' => 'Task moved successfully' ) );
+}
+add_action( 'wp_ajax_pm_move_task', 'dicm_pm_ajax_move_task' );
+
+function dicm_pm_ajax_reorder_tasks() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$task_order = isset( $_POST['task_order'] ) ? $_POST['task_order'] : array();
+	$status_id = intval( $_POST['status_id'] );
+	
+	if ( ! empty( $task_order ) ) {
+		$first_task = $wpdb->get_row( $wpdb->prepare(
+			"SELECT * FROM $tasks_table WHERE id = %d",
+			intval( $task_order[0] )
+		) );
+		
+		if ( ! $first_task || ! dicm_pm_user_has_project_access( $first_task->project_id, $user_id ) ) {
+			wp_send_json_error( array( 'message' => 'Access denied' ) );
+		}
+	}
+	
+	foreach ( $task_order as $index => $task_id ) {
+		$wpdb->update( $tasks_table,
+			array( 'order_index' => $index, 'status_id' => $status_id ),
+			array( 'id' => intval( $task_id ) )
+		);
+	}
+	
+	wp_send_json_success( array( 'message' => 'Tasks reordered successfully' ) );
+}
+add_action( 'wp_ajax_pm_reorder_tasks', 'dicm_pm_ajax_reorder_tasks' );
+
+// ==================== USER HANDLER ====================
+
+function dicm_pm_ajax_get_users() {
+	dicm_pm_verify_request();
+	
+	$users = get_users( array(
+		'number' => 50,
+		'orderby' => 'display_name',
+		'order' => 'ASC'
+	) );
+	
+	$user_list = array();
+	foreach ( $users as $user ) {
+		$user_list[] = array(
+			'id' => $user->ID,
+			'name' => $user->display_name,
+			'email' => $user->user_email,
+			'avatar' => get_avatar_url( $user->ID, array( 'size' => 32 ) )
+		);
+	}
+	
+	wp_send_json_success( array( 'users' => $user_list ) );
+}
+add_action( 'wp_ajax_pm_get_users', 'dicm_pm_ajax_get_users' );
+
+// ==================== DAILY TASK ENTRIES HANDLERS ====================
+
+function dicm_pm_ajax_get_daily_task_entries() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$daily_tasks_table = $wpdb->prefix . 'pm_daily_task_entries';
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$task_id = intval( $_POST['task_id'] );
+	
+	// Verify access to task's project
+	$task = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE id = %d",
+		$task_id
+	) );
+	
+	if ( ! $task || ! dicm_pm_user_has_project_access( $task->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$entries = $wpdb->get_results( $wpdb->prepare(
+		"SELECT * FROM $daily_tasks_table WHERE task_id = %d ORDER BY start_time ASC",
+		$task_id
+	) );
+	
+	wp_send_json_success( array( 'entries' => $entries ) );
+}
+add_action( 'wp_ajax_pm_get_daily_task_entries', 'dicm_pm_ajax_get_daily_task_entries' );
+
+function dicm_pm_ajax_create_daily_task_entry() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$daily_tasks_table = $wpdb->prefix . 'pm_daily_task_entries';
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$task_id = intval( $_POST['task_id'] );
+	$description = sanitize_textarea_field( $_POST['description'] ?? '' );
+	$start_time = sanitize_text_field( $_POST['start_time'] );
+	$end_time = sanitize_text_field( $_POST['end_time'] );
+	
+	// Verify access to task's project
+	$task = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE id = %d",
+		$task_id
+	) );
+	
+	if ( ! $task || ! dicm_pm_user_has_project_access( $task->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$result = $wpdb->insert( $daily_tasks_table, array(
+		'task_id' => $task_id,
+		'description' => $description,
+		'start_time' => $start_time,
+		'end_time' => $end_time
+	) );
+	
+	if ( $result === false ) {
+		wp_send_json_error( array( 'message' => 'Failed to create daily task entry' ) );
+	}
+	
+	$entry_id = $wpdb->insert_id;
+	$entry = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $daily_tasks_table WHERE id = %d", $entry_id ) );
+	
+	wp_send_json_success( array(
+		'message' => 'Daily task entry created successfully',
+		'entry' => $entry
+	) );
+}
+add_action( 'wp_ajax_pm_create_daily_task_entry', 'dicm_pm_ajax_create_daily_task_entry' );
+
+function dicm_pm_ajax_update_daily_task_entry() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$daily_tasks_table = $wpdb->prefix . 'pm_daily_task_entries';
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$entry_id = intval( $_POST['entry_id'] );
+	
+	$entry = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $daily_tasks_table WHERE id = %d",
+		$entry_id
+	) );
+	
+	if ( ! $entry ) {
+		wp_send_json_error( array( 'message' => 'Entry not found' ) );
+	}
+	
+	// Verify access to task's project
+	$task = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE id = %d",
+		$entry->task_id
+	) );
+	
+	if ( ! $task || ! dicm_pm_user_has_project_access( $task->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$data = array();
+	if ( isset( $_POST['description'] ) ) $data['description'] = sanitize_textarea_field( $_POST['description'] );
+	if ( isset( $_POST['start_time'] ) ) $data['start_time'] = sanitize_text_field( $_POST['start_time'] );
+	if ( isset( $_POST['end_time'] ) ) $data['end_time'] = sanitize_text_field( $_POST['end_time'] );
+	
+	if ( empty( $data ) ) {
+		wp_send_json_error( array( 'message' => 'No data to update' ) );
+	}
+	
+	$wpdb->update( $daily_tasks_table, $data, array( 'id' => $entry_id ) );
+	
+	$updated_entry = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $daily_tasks_table WHERE id = %d", $entry_id ) );
+	
+	wp_send_json_success( array(
+		'message' => 'Daily task entry updated successfully',
+		'entry' => $updated_entry
+	) );
+}
+add_action( 'wp_ajax_pm_update_daily_task_entry', 'dicm_pm_ajax_update_daily_task_entry' );
+
+function dicm_pm_ajax_delete_daily_task_entry() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$daily_tasks_table = $wpdb->prefix . 'pm_daily_task_entries';
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$entry_id = intval( $_POST['entry_id'] );
+	
+	$entry = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $daily_tasks_table WHERE id = %d",
+		$entry_id
+	) );
+	
+	if ( ! $entry ) {
+		wp_send_json_error( array( 'message' => 'Entry not found' ) );
+	}
+	
+	// Verify access to task's project
+	$task = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE id = %d",
+		$entry->task_id
+	) );
+	
+	if ( ! $task || ! dicm_pm_user_has_project_access( $task->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	$wpdb->delete( $daily_tasks_table, array( 'id' => $entry_id ) );
+	
+	wp_send_json_success( array( 'message' => 'Daily task entry deleted successfully' ) );
+}
+add_action( 'wp_ajax_pm_delete_daily_task_entry', 'dicm_pm_ajax_delete_daily_task_entry' );
+
+// Initialize Project Manager tables on plugin load
+add_action( 'init', 'dicm_pm_ensure_tables' );
