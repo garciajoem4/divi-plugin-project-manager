@@ -775,6 +775,71 @@ function dicm_pm_ajax_get_shared_project() {
 add_action( 'wp_ajax_pm_get_shared_project', 'dicm_pm_ajax_get_shared_project' );
 add_action( 'wp_ajax_nopriv_pm_get_shared_project', 'dicm_pm_ajax_get_shared_project' );
 
+// Public AJAX handler to get shared task (no authentication required)
+function dicm_pm_ajax_get_shared_task() {
+	global $wpdb;
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	$daily_tasks_table = $wpdb->prefix . 'pm_daily_task_entries';
+	
+	$task_token = sanitize_text_field( $_POST['task_token'] );
+	
+	// Get task by share token (task_token format: taskid_projecttoken)
+	$parts = explode( '_', $task_token );
+	if ( count( $parts ) !== 2 ) {
+		wp_send_json_error( array( 'message' => 'Invalid share link' ) );
+	}
+	
+	$task_id = intval( $parts[0] );
+	$project_token = $parts[1];
+	
+	// Get task
+	$task = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE id = %d",
+		$task_id
+	) );
+	
+	if ( ! $task ) {
+		wp_send_json_error( array( 'message' => 'Task not found' ) );
+	}
+	
+	// Verify project is public and share token matches
+	$project = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $projects_table WHERE id = %d AND is_public = 1 AND archived = 0 AND share_token = %s",
+		$task->project_id, $project_token
+	) );
+	
+	if ( ! $project ) {
+		wp_send_json_error( array( 'message' => 'Access denied or project not shared publicly' ) );
+	}
+	
+	// Add user info
+	if ( $task->assignee_id ) {
+		$assignee = get_userdata( $task->assignee_id );
+		$task->assignee_name = $assignee ? $assignee->display_name : 'Unknown';
+		$task->assignee_avatar = get_avatar_url( $task->assignee_id, array( 'size' => 32 ) );
+	}
+	$creator = get_userdata( $task->creator_id );
+	$task->creator_name = $creator ? $creator->display_name : 'Unknown';
+	
+	// Get daily task entries
+	$entries = $wpdb->get_results( $wpdb->prepare(
+		"SELECT * FROM $daily_tasks_table WHERE task_id = %d ORDER BY start_time ASC",
+		$task_id
+	) );
+	
+	wp_send_json_success( array( 
+		'task' => $task,
+		'entries' => $entries,
+		'project' => array(
+			'name' => $project->name,
+			'owner_name' => get_userdata( $project->owner_id )->display_name
+		)
+	) );
+}
+add_action( 'wp_ajax_pm_get_shared_task', 'dicm_pm_ajax_get_shared_task' );
+add_action( 'wp_ajax_nopriv_pm_get_shared_task', 'dicm_pm_ajax_get_shared_task' );
+
 // ==================== STATUS HANDLERS ====================
 
 function dicm_pm_ajax_get_statuses() {
@@ -970,6 +1035,44 @@ function dicm_pm_ajax_get_tasks() {
 	wp_send_json_success( array( 'tasks' => $tasks ) );
 }
 add_action( 'wp_ajax_pm_get_tasks', 'dicm_pm_ajax_get_tasks' );
+
+function dicm_pm_ajax_get_task() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	$daily_tasks_table = $wpdb->prefix . 'pm_daily_task_entries';
+	
+	$task_id = intval( $_POST['task_id'] );
+	
+	$task = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE id = %d",
+		$task_id
+	) );
+	
+	if ( ! $task || ! dicm_pm_user_has_project_access( $task->project_id, $user_id ) ) {
+		wp_send_json_error( array( 'message' => 'Access denied' ) );
+	}
+	
+	// Add user info
+	if ( $task->assignee_id ) {
+		$assignee = get_userdata( $task->assignee_id );
+		$task->assignee_name = $assignee ? $assignee->display_name : 'Unknown';
+		$task->assignee_avatar = get_avatar_url( $task->assignee_id, array( 'size' => 32 ) );
+	}
+	
+	// Get daily task entries
+	$entries = $wpdb->get_results( $wpdb->prepare(
+		"SELECT * FROM $daily_tasks_table WHERE task_id = %d ORDER BY start_time ASC",
+		$task_id
+	) );
+	
+	wp_send_json_success( array( 
+		'task' => $task,
+		'entries' => $entries
+	) );
+}
+add_action( 'wp_ajax_pm_get_task', 'dicm_pm_ajax_get_task' );
 
 function dicm_pm_ajax_create_task() {
 	$user_id = dicm_pm_verify_request();

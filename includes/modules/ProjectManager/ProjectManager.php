@@ -321,6 +321,14 @@ class DICM_ProjectManager extends ET_Builder_Module {
 		// Ensure jQuery is available (WordPress includes it)
 		wp_enqueue_script( 'jquery' );
 		
+		// Enqueue CSS
+		wp_enqueue_style(
+			'dicm-pm-style',
+			plugin_dir_url( dirname( dirname( dirname( __FILE__ ) ) ) ) . 'styles/style.min.css',
+			array(),
+			'1.0.0'
+		);
+		
 		// Register React
 		wp_enqueue_script(
 			'react',
@@ -785,6 +793,43 @@ class DICM_ProjectManager extends ET_Builder_Module {
 
 	// ==================== TASK AJAX HANDLERS ====================
 
+	public function ajax_get_task() {
+		$user_id = $this->verify_request();
+		
+		global $wpdb;
+		$tasks_table = $wpdb->prefix . 'pm_tasks';
+		$daily_tasks_table = $wpdb->prefix . 'pm_daily_task_entries';
+		
+		$task_id = intval( $_POST['task_id'] );
+		
+		$task = $wpdb->get_row( $wpdb->prepare(
+			"SELECT * FROM $tasks_table WHERE id = %d",
+			$task_id
+		) );
+		
+		if ( ! $task || ! $this->user_has_project_access( $task->project_id, $user_id ) ) {
+			wp_send_json_error( array( 'message' => 'Access denied' ) );
+		}
+		
+		// Add user info
+		if ( $task->assignee_id ) {
+			$assignee = get_userdata( $task->assignee_id );
+			$task->assignee_name = $assignee ? $assignee->display_name : 'Unknown';
+			$task->assignee_avatar = get_avatar_url( $task->assignee_id, array( 'size' => 32 ) );
+		}
+		
+		// Get daily task entries
+		$entries = $wpdb->get_results( $wpdb->prepare(
+			"SELECT * FROM $daily_tasks_table WHERE task_id = %d ORDER BY start_time ASC",
+			$task_id
+		) );
+		
+		wp_send_json_success( array( 
+			'task' => $task,
+			'entries' => $entries
+		) );
+	}
+
 	public function ajax_get_tasks() {
 		$user_id = $this->verify_request();
 		
@@ -1200,14 +1245,20 @@ class DICM_ProjectManager extends ET_Builder_Module {
 	}
 
 	public function render( $attrs, $content, $render_slug ) {
-		// Check if this is a public share view
-		$is_public_view = isset( $_GET['pm_share'] ) && ! empty( $_GET['pm_share'] );
+		// Check if this is a public share view (project or task)
+		$is_public_view = ( isset( $_GET['pm_share'] ) && ! empty( $_GET['pm_share'] ) ) ||
+		                  ( isset( $_GET['pm_task'] ) && ! empty( $_GET['pm_task'] ) );
 		
 		// Require login only if not a public share view
 		if ( ! is_user_logged_in() && ! $is_public_view ) {
 			return '<div class="dicm-project-manager pm-login-required">
 				<p>Please <a href="' . wp_login_url( get_permalink() ) . '">log in</a> to access the Project Manager.</p>
 			</div>';
+		}
+		
+		// Ensure scripts and styles are enqueued for public views
+		if ( $is_public_view ) {
+			$this->enqueue_frontend_scripts();
 		}
 		
 		$current_user_id = is_user_logged_in() ? get_current_user_id() : 0;
