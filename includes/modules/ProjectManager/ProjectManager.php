@@ -197,12 +197,25 @@ class DICM_ProjectManager extends ET_Builder_Module {
 				created_at datetime DEFAULT CURRENT_TIMESTAMP,
 				updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 				archived tinyint(1) DEFAULT 0,
+				is_public tinyint(1) DEFAULT 0,
+				share_token varchar(32) DEFAULT NULL,
 				PRIMARY KEY (id),
+				UNIQUE KEY share_token (share_token),
 				KEY owner_id (owner_id)
 			) $charset_collate;";
 			
 			require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
 			dbDelta( $sql );
+		}
+		
+		// Add is_public and share_token columns if they don't exist (for existing installations)
+		$column_exists = $wpdb->get_results( "SHOW COLUMNS FROM $projects_table LIKE 'is_public'" );
+		if ( empty( $column_exists ) ) {
+			$wpdb->query( "ALTER TABLE $projects_table ADD is_public tinyint(1) DEFAULT 0 AFTER archived" );
+		}
+		$column_exists = $wpdb->get_results( "SHOW COLUMNS FROM $projects_table LIKE 'share_token'" );
+		if ( empty( $column_exists ) ) {
+			$wpdb->query( "ALTER TABLE $projects_table ADD share_token varchar(32) DEFAULT NULL AFTER is_public, ADD UNIQUE KEY share_token (share_token)" );
 		}
 		
 		// Statuses table (Kanban columns)
@@ -525,6 +538,99 @@ class DICM_ProjectManager extends ET_Builder_Module {
 		$wpdb->delete( $projects_table, array( 'id' => $project_id ) );
 		
 		wp_send_json_success( array( 'message' => 'Project deleted successfully' ) );
+	}
+
+	public function ajax_toggle_project_share() {
+		$user_id = $this->verify_request();
+		
+		global $wpdb;
+		$projects_table = $wpdb->prefix . 'pm_projects';
+		
+		$project_id = intval( $_POST['project_id'] );
+		
+		// Get project to check ownership
+		$project = $wpdb->get_row( $wpdb->prepare(
+			"SELECT * FROM $projects_table WHERE id = %d",
+			$project_id
+		) );
+		
+		if ( ! $project || ( $project->owner_id != $user_id && ! $this->is_admin_user() ) ) {
+			wp_send_json_error( array( 'message' => 'Only the project owner can manage sharing' ) );
+		}
+		
+		$is_public = isset( $_POST['is_public'] ) ? intval( $_POST['is_public'] ) : 0;
+		
+		// Generate share token if enabling public sharing and token doesn't exist
+		if ( $is_public && empty( $project->share_token ) ) {
+			$share_token = bin2hex( random_bytes( 16 ) ); // 32 character token
+			$wpdb->update( 
+				$projects_table, 
+				array( 
+					'is_public' => $is_public,
+					'share_token' => $share_token
+				), 
+				array( 'id' => $project_id ) 
+			);
+		} else {
+			$wpdb->update( 
+				$projects_table, 
+				array( 'is_public' => $is_public ), 
+				array( 'id' => $project_id ) 
+			);
+		}
+		
+		// Get updated project
+		$updated_project = $wpdb->get_row( $wpdb->prepare(
+			"SELECT * FROM $projects_table WHERE id = %d",
+			$project_id
+		) );
+		
+		// Generate share URL
+		$share_url = $is_public && $updated_project->share_token 
+			? home_url( '?pm_share=' . $updated_project->share_token )
+			: null;
+		
+		wp_send_json_success( array( 
+			'message' => 'Share settings updated successfully',
+			'is_public' => intval( $updated_project->is_public ),
+			'share_token' => $updated_project->share_token,
+			'share_url' => $share_url
+		) );
+	}
+
+	public function ajax_regenerate_share_token() {
+		$user_id = $this->verify_request();
+		
+		global $wpdb;
+		$projects_table = $wpdb->prefix . 'pm_projects';
+		
+		$project_id = intval( $_POST['project_id'] );
+		
+		// Get project to check ownership
+		$project = $wpdb->get_row( $wpdb->prepare(
+			"SELECT * FROM $projects_table WHERE id = %d",
+			$project_id
+		) );
+		
+		if ( ! $project || ( $project->owner_id != $user_id && ! $this->is_admin_user() ) ) {
+			wp_send_json_error( array( 'message' => 'Only the project owner can manage sharing' ) );
+		}
+		
+		// Generate new share token
+		$share_token = bin2hex( random_bytes( 16 ) );
+		$wpdb->update( 
+			$projects_table, 
+			array( 'share_token' => $share_token ), 
+			array( 'id' => $project_id ) 
+		);
+		
+		$share_url = home_url( '?pm_share=' . $share_token );
+		
+		wp_send_json_success( array( 
+			'message' => 'Share link regenerated successfully',
+			'share_token' => $share_token,
+			'share_url' => $share_url
+		) );
 	}
 
 	// ==================== STATUS AJAX HANDLERS ====================

@@ -485,6 +485,96 @@ const StatusModal = ({ isEditing, editingStatus, onSubmit, onClose }) => {
 	);
 };
 
+const ShareModal = ({ project, shareUrl, isPublic, onToggleShare, onRegenerateLink, onClose }) => {
+	const [copied, setCopied] = useState(false);
+	const [isSharing, setIsSharing] = useState(isPublic);
+	
+	const handleCopyLink = () => {
+		if (shareUrl) {
+			navigator.clipboard.writeText(shareUrl).then(() => {
+				setCopied(true);
+				setTimeout(() => setCopied(false), 2000);
+			});
+		}
+	};
+	
+	const handleToggleShare = async () => {
+		const newState = !isSharing;
+		await onToggleShare(newState);
+		setIsSharing(newState);
+	};
+	
+	return (
+		<div className="pm-modal-overlay" onClick={onClose}>
+			<div className="pm-modal" onClick={e => e.stopPropagation()}>
+				<div className="pm-modal-header">
+					<h3>Share Project</h3>
+					<button className="pm-modal-close" onClick={onClose}>×</button>
+				</div>
+				<div className="pm-modal-body">
+					<div className="pm-share-info">
+						<p><strong>{project.name}</strong></p>
+						<p className="pm-share-desc">
+							Share this project publicly. Anyone with the link can view the project board.
+						</p>
+					</div>
+					
+					<div className="pm-form-group">
+						<label className="pm-toggle-label">
+							<input
+								type="checkbox"
+								checked={isSharing}
+								onChange={handleToggleShare}
+								className="pm-toggle-input"
+							/>
+							<span className="pm-toggle-slider"></span>
+							<span>Enable Public Sharing</span>
+						</label>
+					</div>
+					
+					{isSharing && shareUrl && (
+						<div className="pm-share-link-section">
+							<label>Public Link</label>
+							<div className="pm-share-link-container">
+								<input
+									type="text"
+									value={shareUrl}
+									readOnly
+									className="pm-share-link-input"
+									onClick={(e) => e.target.select()}
+								/>
+								<button
+									type="button"
+									className="pm-btn pm-btn-secondary"
+									onClick={handleCopyLink}
+								>
+									{copied ? '✓ Copied!' : 'Copy'}
+								</button>
+							</div>
+							<button
+								type="button"
+								className="pm-btn pm-btn-ghost pm-btn-sm"
+								onClick={onRegenerateLink}
+								style={{ marginTop: '8px' }}
+							>
+								Regenerate Link
+							</button>
+							<p className="pm-share-warning">
+								⚠️ Anyone with this link can view the project. Regenerating the link will invalidate the old one.
+							</p>
+						</div>
+					)}
+				</div>
+				<div className="pm-modal-footer">
+					<button type="button" className="pm-btn pm-btn-primary" onClick={onClose}>
+						Done
+					</button>
+				</div>
+			</div>
+		</div>
+	);
+};
+
 // ==================== MAIN COMPONENT ====================
 
 class ProjectManager extends Component {
@@ -515,6 +605,7 @@ class ProjectManager extends Component {
 			showProjectModal: false,
 			showTaskModal: false,
 			showStatusModal: false,
+			showShareModal: false,
 			editingProject: null,
 			editingTask: null,
 			editingStatus: null,
@@ -808,6 +899,62 @@ class ProjectManager extends Component {
 			await this.loadProjects();
 		} catch (error) {
 			this.setState({ error: error.message, loading: false });
+		}
+	}
+
+	// ==================== SHARE HANDLERS ====================
+
+	toggleProjectShare = async (isPublic) => {
+		const { currentProject } = this.state;
+		
+		try {
+			const response = await this.apiCall('pm_toggle_project_share', { 
+				project_id: currentProject.id,
+				is_public: isPublic ? 1 : 0
+			});
+			
+			// Update current project with new share settings
+			this.setState(prev => ({
+				currentProject: {
+					...prev.currentProject,
+					is_public: response.is_public,
+					share_token: response.share_token,
+					share_url: response.share_url
+				}
+			}));
+			
+			return response;
+		} catch (error) {
+			this.setState({ error: error.message });
+			throw error;
+		}
+	}
+
+	regenerateShareLink = async () => {
+		const { currentProject } = this.state;
+		
+		if (!window.confirm('Regenerate share link? The old link will stop working.')) {
+			return;
+		}
+		
+		try {
+			const response = await this.apiCall('pm_regenerate_share_token', { 
+				project_id: currentProject.id
+			});
+			
+			// Update current project with new share token
+			this.setState(prev => ({
+				currentProject: {
+					...prev.currentProject,
+					share_token: response.share_token,
+					share_url: response.share_url
+				}
+			}));
+			
+			return response;
+		} catch (error) {
+			this.setState({ error: error.message });
+			throw error;
 		}
 	}
 
@@ -1230,7 +1377,7 @@ class ProjectManager extends Component {
 	renderKanbanView() {
 		const { 
 			currentProject, statuses, loading, config,
-			showTaskModal, showStatusModal, quickAddStatus, quickAddTitle,
+			showTaskModal, showStatusModal, showShareModal, quickAddStatus, quickAddTitle,
 			dragOverStatus, editingTask, editingStatus, users
 		} = this.state;
 		
@@ -1249,6 +1396,15 @@ class ProjectManager extends Component {
 						</h2>
 					</div>
 					<div className="pm-header-right">
+						{currentProject?.is_owner && (
+							<button 
+								className="pm-btn pm-btn-ghost"
+								onClick={() => this.setState({ showShareModal: true })}
+								title="Share Project"
+							>
+								🔗 Share
+							</button>
+						)}
 						{config.isAdmin && (
 							<button 
 								className="pm-btn pm-btn-secondary"
@@ -1436,6 +1592,17 @@ class ProjectManager extends Component {
 						editingStatus={editingStatus}
 						onSubmit={this.handleStatusSubmit}
 						onClose={() => this.setState({ showStatusModal: false, editingStatus: null })}
+					/>
+				)}
+				
+				{showShareModal && (
+					<ShareModal
+						project={currentProject}
+						shareUrl={currentProject?.share_url || (currentProject?.is_public && currentProject?.share_token ? `${window.location.origin}?pm_share=${currentProject.share_token}` : null)}
+						isPublic={!!currentProject?.is_public}
+						onToggleShare={this.toggleProjectShare}
+						onRegenerateLink={this.regenerateShareLink}
+						onClose={() => this.setState({ showShareModal: false })}
 					/>
 				)}
 			</div>
