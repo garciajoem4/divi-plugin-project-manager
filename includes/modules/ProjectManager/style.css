@@ -1146,3 +1146,144 @@
 	color: #92400e;
 	line-height: 1.5;
 }
+/* Public View - Clickable Task Cards */
+.pm-task-card-clickable {
+	cursor: pointer;
+	transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.pm-task-card-clickable:hover {
+	transform: translateY(-2px);
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+/* Public Task Detail View */
+.pm-public-task-view {
+	background: #f9fafb;
+	min-height: 100vh;
+}
+
+.pm-task-detail-container {
+	max-width: 900px;
+	margin: 0 auto;
+	padding: 24px;
+}
+
+.pm-task-detail-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 24px;
+	flex-wrap: wrap;
+}
+
+.pm-task-detail-header h2 {
+	margin: 0;
+	font-size: 1.75rem;
+	font-weight: 600;
+	color: #111827;
+	flex: 1;
+}
+
+.pm-task-detail-section {
+	background: white;
+	border-radius: 8px;
+	padding: 20px;
+	margin-bottom: 16px;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.pm-task-detail-section h3 {
+	margin: 0 0 12px 0;
+	font-size: 1.1rem;
+	font-weight: 600;
+	color: #111827;
+}
+
+.pm-task-detail-section p {
+	margin: 0;
+	line-height: 1.6;
+	color: #4b5563;
+}
+
+.pm-task-detail-meta {
+	background: white;
+	border-radius: 8px;
+	padding: 20px;
+	margin-bottom: 16px;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+	display: flex;
+	gap: 24px;
+	flex-wrap: wrap;
+}
+
+.pm-task-meta-item {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.pm-task-meta-item strong {
+	font-size: 13px;
+	color: #6b7280;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+.pm-task-meta-item span,
+.pm-task-meta-item .pm-task-assignee {
+	font-size: 15px;
+	color: #111827;
+}
+
+/* Daily Task Entry - Read Only */
+.pm-daily-task-entry-readonly {
+	background: #f9fafb;
+	border: 1px solid #e5e7eb;
+	border-radius: 6px;
+	padding: 16px;
+	margin-bottom: 12px;
+}
+
+.pm-daily-task-entry-header {
+	display: flex;
+	gap: 12px;
+	margin-bottom: 12px;
+	font-size: 14px;
+	font-weight: 500;
+	color: #374151;
+}
+
+.pm-entry-date {
+	color: #111827;
+}
+
+.pm-entry-time {
+	color: #6b7280;
+}
+
+.pm-entry-hours {
+	margin-left: auto;
+	color: #3b82f6;
+	font-weight: 600;
+}
+
+.pm-entry-content {
+	margin-top: 12px;
+}
+
+.pm-entry-content strong {
+	display: block;
+	margin-bottom: 4px;
+	font-size: 13px;
+	color: #6b7280;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+.pm-entry-content p {
+	margin: 0;
+	line-height: 1.6;
+	color: #4b5563;
+	white-space: pre-wrap;
+}

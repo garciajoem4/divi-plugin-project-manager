@@ -1256,11 +1256,6 @@ class DICM_ProjectManager extends ET_Builder_Module {
 			</div>';
 		}
 		
-		// Ensure scripts and styles are enqueued for public views
-		if ( $is_public_view ) {
-			$this->enqueue_frontend_scripts();
-		}
-		
 		$current_user_id = is_user_logged_in() ? get_current_user_id() : 0;
 		$post_id = get_the_ID();
 		$module_index = isset( $attrs['_order_number'] ) ? $attrs['_order_number'] : rand(1000, 9999);
