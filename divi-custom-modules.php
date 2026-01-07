@@ -620,6 +620,101 @@ function dicm_pm_ajax_delete_project() {
 }
 add_action( 'wp_ajax_pm_delete_project', 'dicm_pm_ajax_delete_project' );
 
+function dicm_pm_ajax_toggle_project_share() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	
+	$project_id = intval( $_POST['project_id'] );
+	
+	// Get project to check ownership
+	$project = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $projects_table WHERE id = %d",
+		$project_id
+	) );
+	
+	if ( ! $project || ( $project->owner_id != $user_id && ! current_user_can( 'manage_options' ) ) ) {
+		wp_send_json_error( array( 'message' => 'Only the project owner can manage sharing' ) );
+	}
+	
+	$is_public = isset( $_POST['is_public'] ) ? intval( $_POST['is_public'] ) : 0;
+	
+	// Generate share token if enabling public sharing and token doesn't exist
+	if ( $is_public && empty( $project->share_token ) ) {
+		$share_token = bin2hex( random_bytes( 16 ) ); // 32 character token
+		$wpdb->update( 
+			$projects_table, 
+			array( 
+				'is_public' => $is_public,
+				'share_token' => $share_token
+			), 
+			array( 'id' => $project_id ) 
+		);
+	} else {
+		$wpdb->update( 
+			$projects_table, 
+			array( 'is_public' => $is_public ), 
+			array( 'id' => $project_id ) 
+		);
+	}
+	
+	// Get updated project
+	$updated_project = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $projects_table WHERE id = %d",
+		$project_id
+	) );
+	
+	// Generate share URL
+	$share_url = $is_public && $updated_project->share_token 
+		? home_url( '?pm_share=' . $updated_project->share_token )
+		: null;
+	
+	wp_send_json_success( array( 
+		'message' => 'Share settings updated successfully',
+		'is_public' => intval( $updated_project->is_public ),
+		'share_token' => $updated_project->share_token,
+		'share_url' => $share_url
+	) );
+}
+add_action( 'wp_ajax_pm_toggle_project_share', 'dicm_pm_ajax_toggle_project_share' );
+
+function dicm_pm_ajax_regenerate_share_token() {
+	$user_id = dicm_pm_verify_request();
+	
+	global $wpdb;
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	
+	$project_id = intval( $_POST['project_id'] );
+	
+	// Get project to check ownership
+	$project = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $projects_table WHERE id = %d",
+		$project_id
+	) );
+	
+	if ( ! $project || ( $project->owner_id != $user_id && ! current_user_can( 'manage_options' ) ) ) {
+		wp_send_json_error( array( 'message' => 'Only the project owner can manage sharing' ) );
+	}
+	
+	// Generate new share token
+	$share_token = bin2hex( random_bytes( 16 ) );
+	$wpdb->update( 
+		$projects_table, 
+		array( 'share_token' => $share_token ), 
+		array( 'id' => $project_id ) 
+	);
+	
+	$share_url = home_url( '?pm_share=' . $share_token );
+	
+	wp_send_json_success( array( 
+		'message' => 'Share link regenerated successfully',
+		'share_token' => $share_token,
+		'share_url' => $share_url
+	) );
+}
+add_action( 'wp_ajax_pm_regenerate_share_token', 'dicm_pm_ajax_regenerate_share_token' );
+
 // ==================== STATUS HANDLERS ====================
 
 function dicm_pm_ajax_get_statuses() {
