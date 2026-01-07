@@ -1200,13 +1200,17 @@ class DICM_ProjectManager extends ET_Builder_Module {
 	}
 
 	public function render( $attrs, $content, $render_slug ) {
-		if ( ! is_user_logged_in() ) {
+		// Check if this is a public share view
+		$is_public_view = isset( $_GET['pm_share'] ) && ! empty( $_GET['pm_share'] );
+		
+		// Require login only if not a public share view
+		if ( ! is_user_logged_in() && ! $is_public_view ) {
 			return '<div class="dicm-project-manager pm-login-required">
 				<p>Please <a href="' . wp_login_url( get_permalink() ) . '">log in</a> to access the Project Manager.</p>
 			</div>';
 		}
 		
-		$current_user_id = get_current_user_id();
+		$current_user_id = is_user_logged_in() ? get_current_user_id() : 0;
 		$post_id = get_the_ID();
 		$module_index = isset( $attrs['_order_number'] ) ? $attrs['_order_number'] : rand(1000, 9999);
 		$module_instance_id = 'pm_' . $post_id . '_' . $module_index;
