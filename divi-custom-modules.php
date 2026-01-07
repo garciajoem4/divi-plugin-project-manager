@@ -715,6 +715,66 @@ function dicm_pm_ajax_regenerate_share_token() {
 }
 add_action( 'wp_ajax_pm_regenerate_share_token', 'dicm_pm_ajax_regenerate_share_token' );
 
+// ==================== PUBLIC SHARE HANDLERS (No Auth Required) ====================
+
+function dicm_pm_ajax_get_shared_project() {
+	global $wpdb;
+	$projects_table = $wpdb->prefix . 'pm_projects';
+	$statuses_table = $wpdb->prefix . 'pm_statuses';
+	$tasks_table = $wpdb->prefix . 'pm_tasks';
+	
+	$share_token = isset( $_POST['share_token'] ) ? sanitize_text_field( $_POST['share_token'] ) : '';
+	
+	if ( empty( $share_token ) ) {
+		wp_send_json_error( array( 'message' => 'Invalid share token' ) );
+	}
+	
+	// Get project by share token
+	$project = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM $projects_table WHERE share_token = %s AND is_public = 1 AND archived = 0",
+		$share_token
+	) );
+	
+	if ( ! $project ) {
+		wp_send_json_error( array( 'message' => 'Project not found or not publicly shared' ) );
+	}
+	
+	// Get owner info
+	$owner = get_userdata( $project->owner_id );
+	$project->owner_name = $owner ? $owner->display_name : 'Unknown';
+	
+	// Get statuses
+	$statuses = $wpdb->get_results( $wpdb->prepare(
+		"SELECT * FROM $statuses_table WHERE project_id = %d ORDER BY order_index ASC",
+		$project->id
+	) );
+	
+	// Get tasks
+	$tasks = $wpdb->get_results( $wpdb->prepare(
+		"SELECT * FROM $tasks_table WHERE project_id = %d ORDER BY status_id, order_index ASC",
+		$project->id
+	) );
+	
+	// Add user info to tasks
+	foreach ( $tasks as &$task ) {
+		if ( $task->assignee_id ) {
+			$assignee = get_userdata( $task->assignee_id );
+			$task->assignee_name = $assignee ? $assignee->display_name : 'Unknown';
+			$task->assignee_avatar = get_avatar_url( $task->assignee_id, array( 'size' => 32 ) );
+		}
+		$creator = get_userdata( $task->creator_id );
+		$task->creator_name = $creator ? $creator->display_name : 'Unknown';
+	}
+	
+	wp_send_json_success( array( 
+		'project' => $project,
+		'statuses' => $statuses,
+		'tasks' => $tasks
+	) );
+}
+add_action( 'wp_ajax_pm_get_shared_project', 'dicm_pm_ajax_get_shared_project' );
+add_action( 'wp_ajax_nopriv_pm_get_shared_project', 'dicm_pm_ajax_get_shared_project' );
+
 // ==================== STATUS HANDLERS ====================
 
 function dicm_pm_ajax_get_statuses() {

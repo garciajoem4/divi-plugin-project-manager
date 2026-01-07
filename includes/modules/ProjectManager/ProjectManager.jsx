@@ -588,6 +588,10 @@ class ProjectManager extends Component {
 		// Get fallback values from wp_localize_script if available
 		const wpData = typeof window !== 'undefined' && window.dicmProjectManager ? window.dicmProjectManager : {};
 		
+		// Check if viewing a shared project via URL parameter
+		const urlParams = new URLSearchParams(window.location.search);
+		const shareToken = urlParams.get('pm_share');
+		
 		this.state = {
 			// Core data
 			projects: [],
@@ -599,7 +603,7 @@ class ProjectManager extends Component {
 			// UI state
 			loading: true,
 			error: null,
-			view: 'projects', // 'projects' | 'kanban'
+			view: shareToken ? 'public-kanban' : 'projects', // 'projects' | 'kanban' | 'public-kanban'
 			
 			// Modals
 			showProjectModal: false,
@@ -618,6 +622,10 @@ class ProjectManager extends Component {
 			// Quick add
 			quickAddStatus: null,
 			quickAddTitle: '',
+			
+			// Public share
+			shareToken: shareToken,
+			isPublicView: !!shareToken,
 			
 			// Config - use config from props, fallback to wp_localize_script data
 			config: {
@@ -641,16 +649,23 @@ class ProjectManager extends Component {
 
 	componentDidMount() {
 		const { ajaxUrl, nonce } = this.state.config;
+		const { isPublicView, shareToken } = this.state;
 		
 		// Debug logging
 		console.log('ProjectManager: Initializing with config:', {
 			ajaxUrl: ajaxUrl ? 'set' : 'missing',
 			nonce: nonce ? 'set' : 'missing',
-			jQueryAvailable: typeof window.jQuery !== 'undefined'
+			jQueryAvailable: typeof window.jQuery !== 'undefined',
+			isPublicView,
+			shareToken: shareToken ? 'set' : 'missing'
 		});
 		
-		// Only load data if we have valid config
-		if (ajaxUrl && nonce) {
+		// Load public shared project if viewing via share link
+		if (isPublicView && shareToken) {
+			this.loadSharedProject(shareToken);
+		}
+		// Only load data if we have valid config (authenticated users)
+		else if (ajaxUrl && nonce) {
 			this.loadProjects();
 			this.loadUsers();
 		} else {
@@ -825,6 +840,56 @@ class ProjectManager extends Component {
 			});
 		} catch (error) {
 			this.setState({ error: error.message, loading: false });
+		}
+	}
+
+	loadSharedProject = async (shareToken) => {
+		try {
+			this.setState({ loading: true, error: null });
+			
+			const { ajaxUrl } = this.state.config;
+			
+			// For public view, we don't need nonce verification
+			const params = new URLSearchParams();
+			params.append('action', 'pm_get_shared_project');
+			params.append('share_token', shareToken);
+			
+			const response = await fetch(ajaxUrl, {
+				method: 'POST',
+				body: params,
+				credentials: 'same-origin',
+				headers: {
+					'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+					'X-Requested-With': 'XMLHttpRequest'
+				}
+			});
+			
+			const text = await response.text();
+			let result;
+			
+			try {
+				result = JSON.parse(text);
+			} catch (e) {
+				throw new Error('Invalid server response');
+			}
+			
+			if (!result.success) {
+				throw new Error(result.data?.message || 'Failed to load shared project');
+			}
+			
+			this.setState({
+				currentProject: result.data.project,
+				statuses: result.data.statuses,
+				tasks: result.data.tasks,
+				loading: false,
+				view: 'public-kanban'
+			});
+		} catch (error) {
+			this.setState({ 
+				error: error.message, 
+				loading: false,
+				view: 'error'
+			});
 		}
 	}
 
@@ -1609,6 +1674,109 @@ class ProjectManager extends Component {
 		);
 	}
 
+	renderPublicKanbanView() {
+		const { currentProject, statuses, tasks, loading, config } = this.state;
+		
+		return (
+			<div className="pm-kanban-view pm-public-view">
+				<div className="pm-header">
+					<div className="pm-header-left">
+						<h2 style={{ color: currentProject?.color }}>
+							{currentProject?.name}
+						</h2>
+						<span className="pm-public-badge">Public View (Read Only)</span>
+					</div>
+					<div className="pm-header-right">
+						<span className="pm-project-owner">
+							by {currentProject?.owner_name}
+						</span>
+					</div>
+				</div>
+				
+				{loading ? (
+					<div className="pm-loading">
+						<div className="pm-loading-spinner"></div>
+					</div>
+				) : (
+					<div className="pm-kanban-board">
+						{statuses.map(status => {
+							const statusTasks = tasks.filter(t => String(t.status_id) === String(status.id))
+								.sort((a, b) => a.order_index - b.order_index);
+							
+							return (
+								<div 
+									key={status.id} 
+									className="pm-kanban-column"
+									style={{ 
+										minWidth: `${config.columnMinWidth}px`,
+										backgroundColor: config.columnBgColor 
+									}}
+								>
+									<div className="pm-kanban-column-header" style={{ borderTopColor: status.color }}>
+										<h3>{status.name}</h3>
+										<span className="pm-task-count">{statusTasks.length}</span>
+									</div>
+									
+									<div className="pm-kanban-column-content">
+										{statusTasks.map(task => (
+											<div 
+												key={task.id} 
+												className="pm-task-card"
+												style={{ backgroundColor: config.cardBgColor }}
+											>
+												<div className="pm-task-header">
+													<h4>{task.title}</h4>
+													<span 
+														className="pm-priority-badge"
+														style={{ 
+															backgroundColor: this.getPriorityColor(task.priority) + '20',
+															color: this.getPriorityColor(task.priority)
+														}}
+													>
+														{task.priority}
+													</span>
+												</div>
+												
+												{task.description && (
+													<p className="pm-task-description">{task.description}</p>
+												)}
+												
+												<div className="pm-task-meta">
+													{task.due_date && (
+														<span className={`pm-due-date ${this.isOverdue(task.due_date) ? 'overdue' : ''}`}>
+															📅 {this.formatDate(task.due_date)}
+														</span>
+													)}
+													
+													{task.assignee_id && (
+														<div className="pm-task-assignee">
+															<img 
+																src={task.assignee_avatar} 
+																alt={task.assignee_name}
+																className="pm-avatar"
+															/>
+															<span>{task.assignee_name}</span>
+														</div>
+													)}
+												</div>
+											</div>
+										))}
+										
+										{statusTasks.length === 0 && (
+											<div className="pm-empty-column">
+												No tasks
+											</div>
+										)}
+									</div>
+								</div>
+							);
+						})}
+					</div>
+				)}
+			</div>
+		);
+	}
+
 	render() {
 		const { view, error } = this.state;
 		
@@ -1621,7 +1789,16 @@ class ProjectManager extends Component {
 					</div>
 				)}
 				
-				{view === 'projects' ? this.renderProjectsView() : this.renderKanbanView()}
+				{view === 'projects' && this.renderProjectsView()}
+				{view === 'kanban' && this.renderKanbanView()}
+				{view === 'public-kanban' && this.renderPublicKanbanView()}
+				{view === 'error' && (
+					<div className="pm-empty-state">
+						<div className="pm-empty-icon">❌</div>
+						<h3>Project Not Found</h3>
+						<p>This project may not exist or is not publicly shared.</p>
+					</div>
+				)}
 			</div>
 		);
 	}
